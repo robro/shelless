@@ -1,10 +1,27 @@
 """Chain and nest shell commands without the shell
 
-cmd("sed", ...).pipe("grep", ...)
-$ sed ... | grep ...
+$ ls ... | grep ...
 
-cmd("diff", cmd("unzip", ...), cmd("unzip", ...).pipe("sed", ...))
-$ diff <(unzip ...) <(unzip ... | sed ...)
+run(pln(cmd("ls", ...), cmd("grep", ...)))  [fp  style]
+Cmd("ls", ...).pipe(Cmd("grep", ...)).run() [oop style]
+
+$ diff <(unzip ... | sed ...) <(unzip ... | sed ...)
+
+Cmd(
+    "diff",
+    Cmd("unzip", ...).pipe(Cmd("sed", ...)),
+    Cmd("unzip", ...).pipe(Cmd("sed", ...)),
+).run()
+[oop style]
+
+run(
+    cmd(
+        "diff",
+        pln(cmd("unzip", ...), cmd("sed", ...)),
+        pln(cmd("unzip", ...), cmd("sed", ...)),
+    )
+)
+[fp style]
 """
 
 from abc import ABC, abstractmethod
@@ -12,17 +29,17 @@ from subprocess import CompletedProcess, Popen, PIPE
 from typing import IO, List, Optional, Union
 
 
-class Shelless(ABC):
+class Command(ABC):
     """Abstract base class for objects that represent shell functionality."""
 
     @abstractmethod
-    def run(self) -> "CompletedProcess[bytes]": ...
+    def popen(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]": ...
 
     @abstractmethod
-    def pipe(self) -> "Pipeline": ...
+    def run(self, timeout: Optional[float] = None) -> CompletedProcess[bytes]: ...
 
     @abstractmethod
-    def popen(self) -> "Popen[bytes]": ...
+    def pipe(self, cmd: "Command") -> "Pipeline": ...
 
     @abstractmethod
     def get_cmds(self) -> List["Cmd"]: ...
@@ -31,32 +48,26 @@ class Shelless(ABC):
     def __str__(self) -> str: ...
 
 
-class Cmd(Shelless):
-    """Represents a shell command.
+CmdArgs = Union[Command, str]
 
-    Nested commands or pipelines represent shell process substitution.
+
+class Cmd(Command):
+    """Represents a single program command.
+
+    Nested commands represent shell process substitution.
     """
 
-    args: List[Union[Shelless, str]]
+    prog: str
+    args: List[CmdArgs]
 
-    def __init__(self, *args: Union[Shelless, str]) -> None:
+    def __init__(self, prog: str, *args: CmdArgs) -> None:
+        self.prog = prog
         self.args = list(args)
 
-    def pipe(self, *args: Union[Shelless, str]) -> "Pipeline":
-        """Create a pipe from this command to another command
-        and return them as a pipeline."""
-        return Pipeline(self, Cmd(*args))
-
-    def run(self, timeout: Optional[float] = None) -> "CompletedProcess[bytes]":
-        """Run command and return a CompletedProcess."""
-        proc = self.popen()
-        stdout, stderr = proc.communicate(timeout=timeout)
-        return CompletedProcess(proc.args, proc.returncode, stdout, stderr)
-
     def popen(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]":
-        """Return an opened process for this command."""
+        """Open a process for this command and return it."""
         fds: List[int] = []
-        args: List[str] = []
+        args = [self.prog]
         procs: List[Popen[bytes]] = []
         for arg in self.args:
             if isinstance(arg, str):
@@ -73,53 +84,79 @@ class Cmd(Shelless):
             proc.stdout.close() if proc.stdout else None
         return process
 
-    def get_cmds(self) -> List["Cmd"]:
-        return [self]
-
-    def __str__(self) -> str:
-        return " ".join(a if isinstance(a, str) else f"<({a})" for a in self.args)
-
-
-class Pipeline(Shelless):
-    """Represents piped shell commands.
-
-    Contains list of command instances to pipe together.
-    """
-
-    cmds: List[Cmd]
-
-    def __init__(self, *args: Shelless) -> None:
-        self.cmds = sum([arg.get_cmds() for arg in args], [])  # pyright: ignore
-
-    def pipe(self, *args: Union[Shelless, str]) -> "Pipeline":
-        """Create a pipe from this pipeline to a command and return them
-        as a new pipeline."""
-        return Pipeline(self, Cmd(*args))
-
-    def run(self, timeout: Optional[float] = None) -> "CompletedProcess[bytes]":
-        """Run this pipeline's commands and return a completed process."""
+    def run(self, timeout: Optional[float] = None) -> CompletedProcess[bytes]:
+        """Run command and return the completed process."""
         proc = self.popen()
         stdout, stderr = proc.communicate(timeout=timeout)
         return CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
-    def popen(self) -> "Popen[bytes]":
-        """Open a process for each of this pipeline's commands and return
-        the final process."""
+    def pipe(self, cmd: Command) -> "Pipeline":
+        """Return a new pipeline from this command to command."""
+        return Pipeline(self, cmd)
+
+    def get_cmds(self) -> List["Cmd"]:
+        """Return all commands this command contains."""
+        return [self]
+
+    def __str__(self) -> str:
+        args = " ".join(a if isinstance(a, str) else f"<({a})" for a in self.args)
+        return f"{self.prog} {args}"
+
+
+class Pipeline(Command):
+    """Represents an output-->input chain of program commands."""
+
+    cmds: List["Cmd"]
+
+    def __init__(self, *cmds: Command) -> None:
+        self.cmds = []
+        for cmd in cmds:
+            self.cmds.extend(Cmd(c.prog, *c.args) for c in cmd.get_cmds())
+
+    def popen(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]":
+        """
+        Open a process for each of this pipeline's commands and return
+        the final process.
+        """
         procs: List[Popen[bytes]] = []
         for i, cmd in enumerate(self.cmds):
-            stdin = procs[i - 1].stdout if i > 0 else None
-            procs.append(cmd.popen(stdin))
+            stdin = procs[i - 1].stdout if i > 0 else stdin
+            procs.append(cmd.popen(stdin=stdin))
 
         for proc in procs[:-1]:
             proc.stdout.close() if proc.stdout else None
         return procs[-1]
 
-    def get_cmds(self) -> List[Cmd]:
+    def run(self, timeout: Optional[float] = None) -> CompletedProcess[bytes]:
+        """Run pipeline and return the completed process."""
+        proc = self.popen()
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+    def pipe(self, cmd: Command) -> "Pipeline":
+        """Return a new pipeline from this pipeline to command."""
+        return Pipeline(self, cmd)
+
+    def get_cmds(self) -> List["Cmd"]:
+        """Return all commands this pipeline contains."""
         return self.cmds
 
     def __str__(self) -> str:
         return " | ".join(str(c) for c in self.cmds)
 
 
-def cmd(*args: Union[Shelless, str]) -> Cmd:
-    return Cmd(*args)
+def cmd(program: str, *args: CmdArgs) -> Cmd:
+    """Return a command for program with args."""
+    return Cmd(program, *args)
+
+
+def pln(*cmds: Command) -> Pipeline:
+    """Return a pipeline of commands."""
+    return Pipeline(*cmds)
+
+
+def run(cmd: Command, timeout: Optional[float] = None) -> CompletedProcess[bytes]:
+    """Run command and return the completed process."""
+    proc = cmd.popen()
+    stdout, stderr = proc.communicate(timeout=timeout)
+    return CompletedProcess(proc.args, proc.returncode, stdout, stderr)
