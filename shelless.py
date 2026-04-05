@@ -5,11 +5,17 @@ $ sed ... | grep ...
 
 Cmd("diff", Cmd("unzip", ...), Pipeline(Cmd("unzip", ...), Cmd("sed", ...)))
 $ diff <(unzip ...) <(unzip ... | sed ...)
+
+cmd("diff", cmd("unzip", ...), cmd("unzip", ...).pipe("sed", ...))
+$ diff <(unzip ...) <(unzip ... | sed ...)
 """
 
 from abc import ABC, abstractmethod
 from subprocess import CompletedProcess, Popen, PIPE
 from typing import IO, List, Optional, Union
+
+CmdArg = Union[str, "Cmd", "Pipeline"]
+PipelineArg = Union["Cmd", "Pipeline"]
 
 
 class Shelless(ABC):
@@ -21,14 +27,16 @@ class Shelless(ABC):
         return CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
     @abstractmethod
+    def pipe(self, *args: CmdArg) -> "Pipeline": ...
+
+    @abstractmethod
     def popen(self) -> "Popen[bytes]": ...
 
     @abstractmethod
+    def get_cmds(self) -> List["Cmd"]: ...
+
+    @abstractmethod
     def __str__(self) -> str: ...
-
-
-CmdArg = Union[str, "Cmd", "Pipeline"]
-PipelineArg = Union["Cmd", "Pipeline"]
 
 
 class Cmd(Shelless):
@@ -43,6 +51,10 @@ class Cmd(Shelless):
 
     def __init__(self, *args: CmdArg) -> None:
         self.args = list(args)
+
+    def pipe(self, *args: CmdArg) -> "Pipeline":
+        """Create a Pipeline using this Cmd and new Cmd from args."""
+        return Pipeline(self, Cmd(*args))
 
     def run(self, timeout: Optional[float] = None) -> "CompletedProcess[bytes]":
         """Run this Cmd and return a CompletedProcess."""
@@ -71,25 +83,28 @@ class Cmd(Shelless):
             _proc.stdout.close()  # pyright: ignore
         return proc
 
+    def get_cmds(self) -> List["Cmd"]:
+        return [self]
+
     def __str__(self) -> str:
         return " ".join(a if isinstance(a, str) else f"<({a})" for a in self.args)
 
 
 class Pipeline(Shelless):
-    """Represents piping of shell commands.
+    """Represents piped shell commands.
 
-    Takes any combination of Cmds and Pipelines as args.
+    Contains list of Cmd objects to be piped together.
     """
 
     cmds: List[Cmd]
 
     def __init__(self, *args: PipelineArg) -> None:
-        self.cmds = []
-        for arg in args:
-            if isinstance(arg, Cmd):
-                self.cmds.append(arg)
-            else:
-                self.cmds.extend(arg.cmds)
+        self.cmds = sum([arg.get_cmds() for arg in args], [])  # pyright: ignore
+
+    def pipe(self, *args: CmdArg) -> "Pipeline":
+        """Add a new Cmd from args onto this Pipeline."""
+        self.cmds.append(Cmd(*args))
+        return self
 
     def run(self, timeout: Optional[float] = None) -> "CompletedProcess[bytes]":
         """Run this Pipeline and return a CompletedProcess."""
@@ -110,8 +125,15 @@ class Pipeline(Shelless):
             proc.stdout.close()  # pyright: ignore
         return procs[-1]
 
+    def get_cmds(self) -> List[Cmd]:
+        return self.cmds
+
     def __str__(self) -> str:
         return " | ".join(str(c) for c in self.cmds)
+
+
+def cmd(*args: CmdArg) -> Cmd:
+    return Cmd(*args)
 
 
 def _has_stdout(proc: "Popen[bytes]") -> bool:
