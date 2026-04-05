@@ -1,10 +1,7 @@
 """Chain and nest shell commands without the shell
 
-Pipeline(Cmd("sed", ...), Cmd("grep", ...))
+cmd("sed", ...).pipe("grep", ...)
 $ sed ... | grep ...
-
-Cmd("diff", Cmd("unzip", ...), Pipeline(Cmd("unzip", ...), Cmd("sed", ...)))
-$ diff <(unzip ...) <(unzip ... | sed ...)
 
 cmd("diff", cmd("unzip", ...), cmd("unzip", ...).pipe("sed", ...))
 $ diff <(unzip ...) <(unzip ... | sed ...)
@@ -14,20 +11,15 @@ from abc import ABC, abstractmethod
 from subprocess import CompletedProcess, Popen, PIPE
 from typing import IO, List, Optional, Union
 
-CmdArg = Union[str, "Cmd", "Pipeline"]
-PipelineArg = Union["Cmd", "Pipeline"]
-
 
 class Shelless(ABC):
     """Abstract base class for objects that represent shell functionality."""
 
-    def run(self, timeout: Optional[float] = None) -> "CompletedProcess[bytes]":
-        proc = self.popen()
-        stdout, stderr = proc.communicate(timeout=timeout)
-        return CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    @abstractmethod
+    def run(self) -> "CompletedProcess[bytes]": ...
 
     @abstractmethod
-    def pipe(self, *args: CmdArg) -> "Pipeline": ...
+    def pipe(self) -> "Pipeline": ...
 
     @abstractmethod
     def popen(self) -> "Popen[bytes]": ...
@@ -42,29 +34,27 @@ class Shelless(ABC):
 class Cmd(Shelless):
     """Represents a shell command.
 
-    Takes any combination of strings, Cmds, and Pipelines as args.
-
-    Nested Cmds or Pipelines represent shell process substitution.
+    Nested commands or pipelines represent shell process substitution.
     """
 
-    args: List[CmdArg]
+    args: List[Union[Shelless, str]]
 
-    def __init__(self, *args: CmdArg) -> None:
+    def __init__(self, *args: Union[Shelless, str]) -> None:
         self.args = list(args)
 
-    def pipe(self, *args: CmdArg) -> "Pipeline":
-        """Create a Pipeline using this Cmd and new Cmd from args."""
+    def pipe(self, *args: Union[Shelless, str]) -> "Pipeline":
+        """Create a pipe from this command to another command
+        and return them as a pipeline."""
         return Pipeline(self, Cmd(*args))
 
     def run(self, timeout: Optional[float] = None) -> "CompletedProcess[bytes]":
-        """Run this Cmd and return a CompletedProcess."""
-        return super().run(timeout)
+        """Run command and return a CompletedProcess."""
+        proc = self.popen()
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
     def popen(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]":
-        """Return an opened process for this Cmd.
-
-        Also opens subprocesses for any nested Cmds or Pipelines.
-        """
+        """Return an opened process for this command."""
         fds: List[int] = []
         args: List[str] = []
         procs: List[Popen[bytes]] = []
@@ -72,16 +62,16 @@ class Cmd(Shelless):
             if isinstance(arg, str):
                 args.append(arg)
             else:
-                _proc = arg.popen()
-                fd = _proc.stdout.fileno() if _proc.stdout else -1
+                proc = arg.popen()
+                fd = proc.stdout.fileno() if proc.stdout else -1
                 fds.append(fd)
                 args.append(f"/dev/fd/{fd}")
-                procs.append(_proc)
+                procs.append(proc)
 
-        proc = Popen(args, stdin=stdin, stdout=PIPE, stderr=PIPE, pass_fds=fds)
-        for _proc in filter(_has_stdout, procs):
-            _proc.stdout.close()  # pyright: ignore
-        return proc
+        process = Popen(args, stdin=stdin, stdout=PIPE, stderr=PIPE, pass_fds=fds)
+        for proc in procs:
+            proc.stdout.close() if proc.stdout else None
+        return process
 
     def get_cmds(self) -> List["Cmd"]:
         return [self]
@@ -93,36 +83,35 @@ class Cmd(Shelless):
 class Pipeline(Shelless):
     """Represents piped shell commands.
 
-    Contains list of Cmd objects to be piped together.
+    Contains list of command instances to pipe together.
     """
 
     cmds: List[Cmd]
 
-    def __init__(self, *args: PipelineArg) -> None:
+    def __init__(self, *args: Shelless) -> None:
         self.cmds = sum([arg.get_cmds() for arg in args], [])  # pyright: ignore
 
-    def pipe(self, *args: CmdArg) -> "Pipeline":
-        """Add a new Cmd from args onto this Pipeline."""
-        self.cmds.append(Cmd(*args))
-        return self
+    def pipe(self, *args: Union[Shelless, str]) -> "Pipeline":
+        """Create a pipe from this pipeline to a command and return them
+        as a new pipeline."""
+        return Pipeline(self, Cmd(*args))
 
     def run(self, timeout: Optional[float] = None) -> "CompletedProcess[bytes]":
-        """Run this Pipeline and return a CompletedProcess."""
-        return super().run(timeout)
+        """Run this pipeline's commands and return a completed process."""
+        proc = self.popen()
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
     def popen(self) -> "Popen[bytes]":
-        """Return an opened process for the last Cmd in this Pipeline.
-
-        Opens a process for each subcommand and pipes each process's stdout into
-        the stdin of the following process.
-        """
+        """Open a process for each of this pipeline's commands and return
+        the final process."""
         procs: List[Popen[bytes]] = []
         for i, cmd in enumerate(self.cmds):
             stdin = procs[i - 1].stdout if i > 0 else None
             procs.append(cmd.popen(stdin))
 
-        for proc in filter(_has_stdout, procs[:-1]):
-            proc.stdout.close()  # pyright: ignore
+        for proc in procs[:-1]:
+            proc.stdout.close() if proc.stdout else None
         return procs[-1]
 
     def get_cmds(self) -> List[Cmd]:
@@ -132,9 +121,5 @@ class Pipeline(Shelless):
         return " | ".join(str(c) for c in self.cmds)
 
 
-def cmd(*args: CmdArg) -> Cmd:
+def cmd(*args: Union[Shelless, str]) -> Cmd:
     return Cmd(*args)
-
-
-def _has_stdout(proc: "Popen[bytes]") -> bool:
-    return proc.stdout is not None
