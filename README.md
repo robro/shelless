@@ -2,15 +2,15 @@
 
 ### piping
 ```
-$ ls | grep ...
+ls | grep ...
 ```
 ``` python
->>> run(pipe(cmd("ls"), cmd("grep", ...)))
+run(pipe(cmd("ls"), cmd("grep", ...)))
 ```
 
 ### process substitution
 ```
-$ diff <(unzip ... | sed ...) <(unzip ... | sed ...)
+diff <(unzip ... | sed ...) <(unzip ... | sed ...)
 ```
 ``` python
 run(
