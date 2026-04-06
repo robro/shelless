@@ -1,60 +1,91 @@
-"""Shell commands without the shell
+"""shell features without the shell
+
+piping:
 
 $ ls | grep ...
 
-run(line(cmd("ls"), cmd("grep", ...)))
+run(pipe(cmd("ls"), cmd("grep", ...)))
 
+
+process substitution:
 
 $ diff <(unzip ... | sed ...) <(unzip ... | sed ...)
 
 run(
     cmd(
         "diff",
-        line(cmd("unzip", ...), cmd("sed", ...)),
-        line(cmd("unzip", ...), cmd("sed", ...)),
+        pipe(cmd("unzip", ...), cmd("sed", ...)),
+        pipe(cmd("unzip", ...), cmd("sed", ...)),
     )
 )
 """
 
 from abc import ABC, abstractmethod
 from subprocess import CompletedProcess, Popen, PIPE
-from typing import IO, Iterable, List, Optional, Union
+from typing import Any, IO, Iterable, List, Optional, TypeVar, Union, overload
+from typing import Sequence
+
+T = TypeVar("T")
 
 
-class Command(ABC):
-    """Abstract base class for an object that represents a shell command."""
+class Command(Sequence[T], ABC):
+    """Abstract base class for runnable shell sequences."""
+
+    _items: List[T]
+
+    def __init__(self, items: Iterable[T]):
+        self._items = list(items)
 
     @abstractmethod
-    def popen(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]": ...
+    def open_process(self) -> "Popen[bytes]": ...
 
-    @abstractmethod
-    def get_cmds(self) -> List["Cmd"]: ...
+    def __len__(self) -> int:
+        return len(self._items)
+
+    @overload
+    def __getitem__(self, index: int) -> T:
+        # return self._items[index]
+        pass
+
+    @overload
+    def __getitem__(self, index: slice) -> "Command[T]":
+        # return type(self)(self._items[index.start : index.stop : index.step])
+        pass
+
+    def __getitem__(self, index: object) -> Union["Command[T]", T]:
+        if isinstance(index, int):
+            return self._items[index]
+        if isinstance(index, slice):
+            return type(self)(self._items[index.start : index.stop : index.step])
+        self_type = type(self).__name__
+        index_type = type(index).__name__
+        raise TypeError(
+            f"{self_type} indices must be integers or slices, not {index_type}"
+        )
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({', '.join(x.__repr__() for x in self._items)})"
 
 
-CmdArg = Union[Command, str]
+CmdArg = Union[Command[Any], str]
 
 
-class Cmd(Command):
+class Cmd(Command[CmdArg]):
     """Represents a single program command.
 
     Nested commands represent shell process substitution.
     """
 
-    args: List[CmdArg]
-
-    def __init__(self, args: Iterable[CmdArg]) -> None:
-        self.args = list(args)
-
-    def popen(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]":
+    def open_process(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]":
         """Open a process for this command and return it."""
         fds: List[int] = []
         args: List[str] = []
         procs: List[Popen[bytes]] = []
-        for arg in self.args:
+        for arg in self._items:
             if isinstance(arg, str):
                 args.append(arg)
             else:
-                proc = arg.popen()
+                proc = arg.open_process()
                 fd = proc.stdout.fileno() if proc.stdout else -1
                 fds.append(fd)
                 args.append(f"/dev/fd/{fd}")
@@ -65,57 +96,42 @@ class Cmd(Command):
             proc.stdout.close() if proc.stdout else None
         return process
 
-    def get_cmds(self) -> List["Cmd"]:
-        return [self]
-
-    def __repr__(self) -> str:
-        return f"Cmd({', '.join(a.__repr__() for a in self.args)})"
-
     def __str__(self) -> str:
-        return " ".join(a if isinstance(a, str) else f"<({a})" for a in self.args)
+        return " ".join(a if isinstance(a, str) else f"<({a})" for a in self._items)
 
 
-class Pipeline(Command):
+class Pipeline(Command[Cmd]):
     """Represents a chain of piped program commands."""
 
-    cmds: List[Cmd]
-
-    def __init__(self, cmds: Iterable[Command]) -> None:
-        self.cmds = sum([c.get_cmds() for c in cmds], [])  # pyright: ignore
-
-    def popen(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]":
+    def open_process(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]":
         """Open a process for each command in pipeline and return the last one."""
         procs: List[Popen[bytes]] = []
-        for i, cmd in enumerate(self.cmds):
+        for i, cmd in enumerate(self._items):
             stdin = procs[i - 1].stdout if i > 0 else stdin
-            procs.append(cmd.popen(stdin=stdin))
+            procs.append(cmd.open_process(stdin=stdin))
 
         for proc in procs[:-1]:
             proc.stdout.close() if proc.stdout else None
         return procs[-1]
 
-    def get_cmds(self) -> List["Cmd"]:
-        return self.cmds
-
-    def __repr__(self) -> str:
-        return f"Pipeline({', '.join(c.__repr__() for c in self.cmds)})"
-
     def __str__(self) -> str:
-        return " | ".join(str(c) for c in self.cmds)
+        return " | ".join(str(c) for c in self._items)
 
 
 def cmd(*args: CmdArg) -> Cmd:
-    """Return a command for program with args."""
+    """Return a command of program args."""
     return Cmd(args)
 
 
-def line(*cmds: Command) -> Pipeline:
+def pipe(*cmds: Cmd) -> Pipeline:
     """Return a pipeline of commands."""
     return Pipeline(cmds)
 
 
-def run(cmd: Command, timeout: Optional[float] = None) -> "CompletedProcess[bytes]":
-    """Run commands as pipeline and return the completed process."""
-    proc = cmd.popen()
+def run(
+    cmd: Command[Any], timeout: Optional[float] = None
+) -> "CompletedProcess[bytes]":
+    """Run command and return the completed process."""
+    proc = cmd.open_process()
     stdout, stderr = proc.communicate(timeout=timeout)
     return CompletedProcess(proc.args, proc.returncode, stdout, stderr)
