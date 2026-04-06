@@ -1,19 +1,18 @@
-# shelless
+# shell features without `shell=True`
 
-``` python
-shell features without the shell
-
-piping:
-
+### piping
+```
 $ ls | grep ...
+```
+``` python
+>>> run(pipe(cmd("ls"), cmd("grep", ...)))
+```
 
-run(pipe(cmd("ls"), cmd("grep", ...)))
-
-
-process substitution:
-
+### process substitution
+```
 $ diff <(unzip ... | sed ...) <(unzip ... | sed ...)
-
+```
+``` python
 run(
     cmd(
         "diff",
