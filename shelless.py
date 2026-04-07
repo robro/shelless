@@ -1,15 +1,16 @@
-"""shell features without the shell
+"""shell features without 'shell=True'
+
 
 piping:
 
-$ ls | grep ...
+ls | grep ...
 
 run(pipe(cmd("ls"), cmd("grep", ...)))
 
 
 process substitution:
 
-$ diff <(unzip ... | sed ...) <(unzip ... | sed ...)
+diff <(unzip ... | sed ...) <(unzip ... | sed ...)
 
 run(
     cmd(
