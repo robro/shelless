@@ -1,5 +1,3 @@
-# shell features without `shell=True`
-
 ### piping
 ```
 ls | grep ...
