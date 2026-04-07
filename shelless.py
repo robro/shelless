@@ -61,7 +61,7 @@ class Command(Sequence[T], ABC):
         )
 
     def __add__(self, other: "Command[T]") -> "Command[T]":
-        if type(self) == type(other):
+        if isinstance(other, type(self)):
             return type(self)(self._items + other._items)
         type_self = type(self).__name__
         type_other = type(other).__name__
@@ -84,7 +84,7 @@ class Cmd(Command[CmdArg]):
 
     def __init__(self, args: Iterable[CmdArg]):
         for arg in args:
-            if type(arg) not in [str, Command]:
+            if not isinstance(arg, str) and not isinstance(arg, Command):
                 type_self = type(self).__name__
                 type_arg = type(arg).__name__
                 raise TypeError(
@@ -123,7 +123,7 @@ class Pipeline(Command[Cmd]):
 
     def __init__(self, cmds: Iterable[Cmd]):
         for cmd in cmds:
-            if type(cmd) != Cmd:
+            if not isinstance(cmd, Cmd):
                 type_self = type(self).__name__
                 type_cmd = type(cmd).__name__
                 raise TypeError(f'{type_self} can only contain Cmd (not "{type_cmd}")')
