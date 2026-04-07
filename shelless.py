@@ -5,19 +5,17 @@ piping:
 
 ls | grep ...
 
-run(pipe(cmd("ls"), cmd("grep", ...)))
+pipe(cmd("ls"), cmd("grep", ...))
 
 
 process substitution:
 
-diff <(unzip ... | sed ...) <(unzip ... | sed ...)
+diff <(zcat ... | sed ...) <(zcat ... | sed ...)
 
-run(
-    cmd(
-        "diff",
-        pipe(cmd("unzip", ...), cmd("sed", ...)),
-        pipe(cmd("unzip", ...), cmd("sed", ...)),
-    )
+cmd(
+    "diff",
+    pipe(cmd("zcat", ...), cmd("sed", ...)),
+    pipe(cmd("zcat", ...), cmd("sed", ...))
 )
 """
 
@@ -32,10 +30,8 @@ T = TypeVar("T")
 class Command(Sequence[T], ABC):
     """Abstract base class for runnable shell sequences."""
 
-    _items: List[T]
-
     def __init__(self, items: Iterable[T]):
-        self._items = list(items)
+        self._items: List[T] = list(items)
 
     @abstractmethod
     def open_process(self) -> "Popen[bytes]": ...
@@ -58,10 +54,19 @@ class Command(Sequence[T], ABC):
             return self._items[index]
         if isinstance(index, slice):
             return type(self)(self._items[index.start : index.stop : index.step])
-        self_type = type(self).__name__
-        index_type = type(index).__name__
+        type_self = type(self).__name__
+        type_index = type(index).__name__
         raise TypeError(
-            f"{self_type} indices must be integers or slices, not {index_type}"
+            f"{type_self} indices must be integers or slices, not {type_index}"
+        )
+
+    def __add__(self, other: "Command[T]") -> "Command[T]":
+        if type(self) == type(other):
+            return type(self)(self._items + other._items)
+        type_self = type(self).__name__
+        type_other = type(other).__name__
+        raise TypeError(
+            f'can only concatenate {type_self} (not "{type_other}") to {type_self}'
         )
 
     def __repr__(self) -> str:
@@ -74,11 +79,23 @@ CmdArg = Union[Command[Any], str]
 class Cmd(Command[CmdArg]):
     """Represents a single program command.
 
-    Nested commands represent shell process substitution.
+    Nested command arguments represent shell process substitution.
     """
+
+    def __init__(self, args: Iterable[CmdArg]):
+        for arg in args:
+            if type(arg) not in [str, Command]:
+                type_self = type(self).__name__
+                type_arg = type(arg).__name__
+                raise TypeError(
+                    f'{type_self} can only contain str or Command (not "{type_arg}")'
+                )
+        super().__init__(args)
 
     def open_process(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]":
         """Open a process for this command and return it."""
+        if not self._items:
+            raise Exception("cannot open process of empty command.")
         fds: List[int] = []
         args: List[str] = []
         procs: List[Popen[bytes]] = []
@@ -104,13 +121,22 @@ class Cmd(Command[CmdArg]):
 class Pipeline(Command[Cmd]):
     """Represents a chain of piped program commands."""
 
+    def __init__(self, cmds: Iterable[Cmd]):
+        for cmd in cmds:
+            if type(cmd) != Cmd:
+                type_self = type(self).__name__
+                type_cmd = type(cmd).__name__
+                raise TypeError(f'{type_self} can only contain Cmd (not "{type_cmd}")')
+        super().__init__(cmds)
+
     def open_process(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]":
         """Open a process for each command in pipeline and return the last one."""
+        if not self._items:
+            raise Exception("cannot open processes of empty pipeline.")
         procs: List[Popen[bytes]] = []
         for i, cmd in enumerate(self._items):
             stdin = procs[i - 1].stdout if i > 0 else stdin
             procs.append(cmd.open_process(stdin=stdin))
-
         for proc in procs[:-1]:
             proc.stdout.close() if proc.stdout else None
         return procs[-1]
