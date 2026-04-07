@@ -21,7 +21,7 @@ cmd(
 
 from abc import ABC, abstractmethod
 from subprocess import CompletedProcess, Popen, PIPE
-from typing import Any, IO, Iterable, List, Optional, TypeVar, Union, overload
+from typing import Any, IO, Iterable, List, Optional, Type, TypeVar, Union, overload
 from typing import Sequence
 
 T = TypeVar("T")
@@ -30,8 +30,21 @@ T = TypeVar("T")
 class Command(Sequence[T], ABC):
     """Abstract base class for runnable shell sequences."""
 
+    _valid_types: List[Type[Any]]
+
     def __init__(self, items: Iterable[T]):
-        self._items: List[T] = list(items)
+        self._items: List[T] = []
+        for item in items:
+            self._validate(item)
+            self._items.append(item)
+
+    def _validate(self, value: Any) -> None:
+        if any(isinstance(value, t) for t in self._valid_types):
+            return
+        t_self = type(self).__name__
+        t_value = type(value).__name__
+        t_valid = " or ".join([t.__name__ for t in self._valid_types])
+        raise TypeError(f'{t_self} can only contain {t_valid} (not "{t_value}")')
 
     @abstractmethod
     def open_process(self) -> "Popen[bytes]": ...
@@ -54,20 +67,16 @@ class Command(Sequence[T], ABC):
             return self._items[index]
         if isinstance(index, slice):
             return type(self)(self._items[index.start : index.stop : index.step])
-        type_self = type(self).__name__
-        type_index = type(index).__name__
-        raise TypeError(
-            f"{type_self} indices must be integers or slices, not {type_index}"
-        )
+        t_self = type(self).__name__
+        t_index = type(index).__name__
+        raise TypeError(f"{t_self} indices must be integers or slices, not {t_index}")
 
     def __add__(self, other: "Command[T]") -> "Command[T]":
         if isinstance(other, type(self)):
             return type(self)(self._items + other._items)
-        type_self = type(self).__name__
-        type_other = type(other).__name__
-        raise TypeError(
-            f'can only concatenate {type_self} (not "{type_other}") to {type_self}'
-        )
+        t_self = type(self).__name__
+        t_other = type(other).__name__
+        raise TypeError(f'can only concatenate {t_self} (not "{t_other}") to {t_self}')
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({', '.join(x.__repr__() for x in self._items)})"
@@ -82,14 +91,9 @@ class Cmd(Command[CmdArg]):
     Nested command arguments represent shell process substitution.
     """
 
+    _valid_types: List[Type[Any]] = [Command, str]
+
     def __init__(self, args: Iterable[CmdArg]):
-        for arg in args:
-            if not isinstance(arg, str) and not isinstance(arg, Command):
-                type_self = type(self).__name__
-                type_arg = type(arg).__name__
-                raise TypeError(
-                    f'{type_self} can only contain str or Command (not "{type_arg}")'
-                )
         super().__init__(args)
 
     def open_process(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]":
@@ -121,12 +125,9 @@ class Cmd(Command[CmdArg]):
 class Pipeline(Command[Cmd]):
     """Represents a chain of piped program commands."""
 
+    _valid_types: List[Type[Any]] = [Cmd]
+
     def __init__(self, cmds: Iterable[Cmd]):
-        for cmd in cmds:
-            if not isinstance(cmd, Cmd):
-                type_self = type(self).__name__
-                type_cmd = type(cmd).__name__
-                raise TypeError(f'{type_self} can only contain Cmd (not "{type_cmd}")')
         super().__init__(cmds)
 
     def open_process(self, stdin: Optional[IO[bytes]] = None) -> "Popen[bytes]":
