@@ -1,21 +1,19 @@
 ### piping
-```
+``` sh
 ls | grep ...
 ```
 ``` python
-run(pipe(cmd("ls"), cmd("grep", ...)))
+pipe(cmd("ls"), cmd("grep", ...))
 ```
 
 ### process substitution
-```
-diff <(unzip ... | sed ...) <(unzip ... | sed ...)
+``` sh
+diff <(zcat ... | sed ...) <(zcat ... | sed ...)
 ```
 ``` python
-run(
-    cmd(
-        "diff",
-        pipe(cmd("unzip", ...), cmd("sed", ...)),
-        pipe(cmd("unzip", ...), cmd("sed", ...)),
-    )
+cmd(
+    "diff",
+    pipe(cmd("zcat", ...), cmd("sed", ...)),
+    pipe(cmd("zcat", ...), cmd("sed", ...)),
 )
 ```
