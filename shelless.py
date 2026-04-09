@@ -5,30 +5,28 @@ piping:
 
 ls | grep ...
 
-pipe(cmd("ls"), cmd("grep", ...))
+run([['ls'], ['grep', ...]])
 
 
 process substitution:
 
 diff <(zcat ... | sed ...) <(zcat ... | sed ...)
 
-cmd(
-    "diff",
-    pipe(cmd("zcat", ...), cmd("sed", ...)),
-    pipe(cmd("zcat", ...), cmd("sed", ...))
-)
+sub1 = [['zcat', ...], ['sed', ...]]
+sub2 = [['zcat', ...], ['sed', ...]]
+run(['diff', sub1, sub2])
 """
 
 import shlex
-from abc import ABC, abstractmethod
 from dataclasses import dataclass  # pyright: ignore
 from io import IOBase
 from subprocess import CompletedProcess, Popen
 from tempfile import NamedTemporaryFile, TemporaryFile
-from typing import Any, IO, Iterable, List, Optional, TypeVar, Union, overload, Sequence
+from typing import Any, IO, List, Optional, Union, Sequence
 
-T = TypeVar("T")
 _FILE = Union[IO[Any], int]
+_CMD = Sequence[Union[str, "_CMD"]]
+_PIPELINE = Sequence[_CMD]
 
 
 @dataclass
@@ -52,141 +50,8 @@ class ShellessProcess:
         return self._process.returncode
 
 
-class ShellessCommand(Sequence[T], ABC):
-    """Abstract base class for runnable shell sequences."""
-
-    _items: List[T]
-
-    def __init__(self, items: Iterable[T]):
-        self._items = list(items)
-
-    @abstractmethod
-    def get_process(
-        self,
-        stdin: Optional[_FILE] = None,
-        stdout: Optional[_FILE] = None,
-        stderr: Optional[_FILE] = None,
-        timeout: Optional[float] = None,
-    ) -> ShellessProcess:
-        pass
-
-    def __len__(self) -> int:
-        return len(self._items)
-
-    @overload
-    def __getitem__(self, index: int) -> T:
-        pass
-
-    @overload
-    def __getitem__(self, index: slice) -> "ShellessCommand[T]":
-        pass
-
-    def __getitem__(self, index: Any) -> Union["ShellessCommand[T]", T]:
-        if isinstance(index, int):
-            return self._items[index]
-        if isinstance(index, slice):
-            return type(self)(self._items[index.start : index.stop : index.step])
-        t_self = type(self).__name__
-        t_index = type(index).__name__
-        raise TypeError(f"{t_self} indices must be integers or slices, not {t_index}")
-
-    def __add__(self, other: "ShellessCommand[T]") -> "ShellessCommand[T]":
-        if isinstance(other, type(self)):
-            return type(self)(self._items + other._items)
-        t_self = type(self).__name__
-        t_other = type(other).__name__
-        raise TypeError(f'can only concatenate {t_self} (not "{t_other}") to {t_self}')
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({', '.join(item.__repr__() for item in self)})"
-
-
-CmdArg = Union[ShellessCommand[Any], str]
-
-
-class Cmd(ShellessCommand[CmdArg]):
-    """Represents a single program command.
-
-    Nested command arguments represent shell process substitution.
-    """
-
-    def __init__(self, args: Iterable[CmdArg]):
-        super().__init__(args)
-
-    def get_process(
-        self,
-        stdin: Optional[_FILE] = None,
-        stdout: Optional[_FILE] = None,
-        stderr: Optional[_FILE] = None,
-        timeout: Optional[float] = None,
-    ) -> ShellessProcess:
-        """Return process for command after running all sub-commands."""
-        args: List[str] = []
-        temp_files: List[IO[bytes]] = []
-        for arg in self:
-            if isinstance(arg, ShellessCommand):
-                temp_file = NamedTemporaryFile()
-                process = arg.get_process(None, temp_file, stderr, timeout)
-                process.communicate(timeout=timeout)
-                temp_file.seek(0)
-                temp_files.append(temp_file)
-                args.append(temp_file.name)
-            else:
-                args.append(arg)
-        process = Popen(args, stdin=stdin, stdout=stdout, stderr=stderr)
-        return ShellessProcess(process, temp_files)
-
-    def __str__(self) -> str:
-        return " ".join(
-            shlex.quote(arg) if isinstance(arg, str) else f"<({arg})" for arg in self
-        )
-
-
-class Pipeline(ShellessCommand[Cmd]):
-    """Represents a chain of piped program commands."""
-
-    def __init__(self, cmds: Iterable[Cmd]):
-        super().__init__(cmds)
-
-    def get_process(
-        self,
-        stdin: Optional[_FILE] = None,
-        stdout: Optional[_FILE] = None,
-        stderr: Optional[_FILE] = None,
-        timeout: Optional[float] = None,
-    ) -> ShellessProcess:
-        """Return process for last command in pipeline after running previous commands."""
-        temp_file_1 = TemporaryFile()
-        temp_file_2 = TemporaryFile()
-        last_index = len(self) - 1
-        for i, cmd in enumerate(self):
-            stdin_ = stdin if i == 0 else temp_file_1
-            stdout_ = stdout if i == last_index else temp_file_2
-            process = cmd.get_process(stdin_, stdout_, stderr, timeout)
-            if i == last_index:
-                return process
-            process.communicate(timeout=timeout)
-            stdin_.seek(0) if isinstance(stdin_, IOBase) else None
-            stdout_.seek(0) if isinstance(stdout_, IOBase) else None
-            temp_file_1, temp_file_2 = temp_file_2, temp_file_1
-        raise Exception(f"{type(self).__name__} requires at least 1 command to run")
-
-    def __str__(self) -> str:
-        return " | ".join(str(cmd) for cmd in self)
-
-
-def cmd(*args: CmdArg) -> Cmd:
-    """Return a command of program args."""
-    return Cmd(args)
-
-
-def pipe(*cmds: Cmd) -> Pipeline:
-    """Return a pipeline of commands."""
-    return Pipeline(cmds)
-
-
 def run(
-    cmd: ShellessCommand[Any],
+    cmd: _CMD,
     stdin: Optional[_FILE] = None,
     stdout: Optional[_FILE] = None,
     stderr: Optional[_FILE] = None,
@@ -194,6 +59,89 @@ def run(
     timeout: Optional[float] = None,
 ) -> "CompletedProcess[bytes]":
     """Run command and return the completed process."""
-    process = cmd.get_process(stdin, stdout, stderr, timeout)
+    process = _get_proc(cmd, stdin, stdout, stderr, timeout)
     stdout_, stderr_ = process.communicate(input, timeout)
     return CompletedProcess(process.args, process.returncode, stdout_, stderr_)
+
+
+def _get_proc(
+    cmd: _CMD,
+    stdin: Optional[_FILE] = None,
+    stdout: Optional[_FILE] = None,
+    stderr: Optional[_FILE] = None,
+    timeout: Optional[float] = None,
+):
+    func = _get_cmd_proc if isinstance(cmd[0], str) else _get_pipe_proc
+    return func(cmd, stdin, stdout, stderr, timeout)
+
+
+def _get_cmd_proc(
+    cmd: _CMD,
+    stdin: Optional[_FILE] = None,
+    stdout: Optional[_FILE] = None,
+    stderr: Optional[_FILE] = None,
+    timeout: Optional[float] = None,
+) -> ShellessProcess:
+    """Return process for command after running all sub-commands."""
+    args: List[str] = []
+    temp_files: List[IO[bytes]] = []
+    for arg in cmd:
+        if isinstance(arg, str):
+            args.append(arg)
+        else:
+            temp_file = NamedTemporaryFile()
+            process = _get_proc(arg, None, temp_file, stderr, timeout)
+            process.communicate(timeout=timeout)
+            temp_file.seek(0)
+            temp_files.append(temp_file)
+            args.append(temp_file.name)
+    process = Popen(args, stdin=stdin, stdout=stdout, stderr=stderr)
+    return ShellessProcess(process, temp_files)
+
+
+def _get_pipe_proc(
+    pipeline: _PIPELINE,
+    stdin: Optional[_FILE] = None,
+    stdout: Optional[_FILE] = None,
+    stderr: Optional[_FILE] = None,
+    timeout: Optional[float] = None,
+) -> ShellessProcess:
+    """Return process for last command in pipeline after running previous commands."""
+    temp_file_1 = TemporaryFile()
+    temp_file_2 = TemporaryFile()
+    last_index = len(pipeline) - 1
+    for i, cmd in enumerate(pipeline):
+        stdin_ = stdin if i == 0 else temp_file_1
+        stdout_ = stdout if i == last_index else temp_file_2
+        process = _get_cmd_proc(cmd, stdin_, stdout_, stderr, timeout)
+        if i == last_index:
+            return process
+        process.communicate(timeout=timeout)
+        stdin_.seek(0) if isinstance(stdin_, IOBase) else None
+        stdout_.seek(0) if isinstance(stdout_, IOBase) else None
+        temp_file_1, temp_file_2 = temp_file_2, temp_file_1
+    raise Exception(f"pipeline requires at least 1 command to run")
+
+
+def shell(cmd: _CMD) -> str:
+    func = _cmdstr if isinstance(cmd[0], str) else _pipestr
+    return func(cmd)
+
+
+def _cmdstr(cmd: _CMD) -> str:
+    args: List[str] = []
+    for arg in cmd:
+        if isinstance(arg, str):
+            args.append(shlex.quote(arg))
+        else:
+            func = _cmdstr if isinstance(arg[0], str) else _pipestr
+            args.append(f"<({func(arg)})")
+    return " ".join(args)
+
+
+def _pipestr(pipe: _PIPELINE) -> str:
+    cmds: List[str] = []
+    for cmd in pipe:
+        func = _cmdstr if isinstance(cmd[0], str) else _pipestr
+        cmds.append(func(cmd))
+    return " | ".join(cmds)
