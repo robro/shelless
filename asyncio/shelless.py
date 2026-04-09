@@ -21,9 +21,11 @@ cmd(
 
 import shlex
 from abc import ABC, abstractmethod
+from asyncio import wait_for
+from asyncio.subprocess import Process, create_subprocess_exec
 from dataclasses import dataclass  # pyright: ignore
 from io import IOBase
-from subprocess import CompletedProcess, Popen
+from subprocess import CompletedProcess
 from tempfile import NamedTemporaryFile, TemporaryFile
 from typing import Any, IO, Iterable, List, Optional, TypeVar, Union, overload, Sequence
 
@@ -35,17 +37,12 @@ _FILE = Union[IO[Any], int]
 class ShellessProcess:
     """Wrapper process that holds temp file references for parent processes to use."""
 
-    _process: "Popen[bytes]"
+    args: List[str]
+    _process: Process
     _temp_files: List[IO[Any]]
 
-    def communicate(
-        self, input: Optional[bytes] = None, timeout: Optional[float] = None
-    ):
-        return self._process.communicate(input, timeout)
-
-    @property
-    def args(self):
-        return self._process.args
+    async def communicate(self, input: Optional[bytes] = None):
+        return await self._process.communicate(input)
 
     @property
     def returncode(self):
@@ -61,7 +58,7 @@ class ShellessCommand(Sequence[T], ABC):
         self._items = list(items)
 
     @abstractmethod
-    def get_process(
+    async def get_process(
         self,
         stdin: Optional[_FILE] = None,
         stdout: Optional[_FILE] = None,
@@ -113,28 +110,33 @@ class Cmd(ShellessCommand[CmdArg]):
     def __init__(self, args: Iterable[CmdArg]):
         super().__init__(args)
 
-    def get_process(
+    async def get_process(
         self,
         stdin: Optional[_FILE] = None,
         stdout: Optional[_FILE] = None,
         stderr: Optional[_FILE] = None,
         timeout: Optional[float] = None,
     ) -> ShellessProcess:
-        """Return process for command after running all sub-commands."""
+        """Return process for this command after running all sub-commands."""
         args: List[str] = []
         temp_files: List[IO[bytes]] = []
         for arg in self:
             if isinstance(arg, ShellessCommand):
                 temp_file = NamedTemporaryFile()
-                process = arg.get_process(None, temp_file, stderr, timeout)
-                process.communicate(timeout=timeout)
+                process = await arg.get_process(None, temp_file, stderr, timeout)
+                await wait_for(process.communicate(), timeout)
                 temp_file.seek(0)
                 temp_files.append(temp_file)
                 args.append(temp_file.name)
             else:
                 args.append(arg)
-        process = Popen(args, stdin=stdin, stdout=stdout, stderr=stderr)
-        return ShellessProcess(process, temp_files)
+        process = await create_subprocess_exec(
+            *args,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return ShellessProcess(args, process, temp_files)
 
     def __str__(self) -> str:
         return " ".join(
@@ -148,7 +150,7 @@ class Pipeline(ShellessCommand[Cmd]):
     def __init__(self, cmds: Iterable[Cmd]):
         super().__init__(cmds)
 
-    def get_process(
+    async def get_process(
         self,
         stdin: Optional[_FILE] = None,
         stdout: Optional[_FILE] = None,
@@ -162,10 +164,10 @@ class Pipeline(ShellessCommand[Cmd]):
         for i, cmd in enumerate(self):
             stdin_ = stdin if i == 0 else temp_file_1
             stdout_ = stdout if i == last_index else temp_file_2
-            process = cmd.get_process(stdin_, stdout_, stderr, timeout)
+            process = await cmd.get_process(stdin_, stdout_, stderr, timeout)
             if i == last_index:
                 return process
-            process.communicate(timeout=timeout)
+            await wait_for(process.communicate(), timeout)
             stdin_.seek(0) if isinstance(stdin_, IOBase) else None
             stdout_.seek(0) if isinstance(stdout_, IOBase) else None
             temp_file_1, temp_file_2 = temp_file_2, temp_file_1
@@ -185,7 +187,7 @@ def pipe(*cmds: Cmd) -> Pipeline:
     return Pipeline(cmds)
 
 
-def run(
+async def run(
     cmd: ShellessCommand[Any],
     stdin: Optional[_FILE] = None,
     stdout: Optional[_FILE] = None,
@@ -194,6 +196,7 @@ def run(
     timeout: Optional[float] = None,
 ) -> "CompletedProcess[bytes]":
     """Run command and return the completed process."""
-    process = cmd.get_process(stdin, stdout, stderr, timeout)
-    stdout_, stderr_ = process.communicate(input, timeout)
+    process = await cmd.get_process(stdin, stdout, stderr, timeout)
+    stdout_, stderr_ = await wait_for(process.communicate(input), timeout)
+    assert process.returncode is not None
     return CompletedProcess(process.args, process.returncode, stdout_, stderr_)
