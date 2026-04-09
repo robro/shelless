@@ -3,7 +3,7 @@
 ls | grep ...
 ```
 ``` python
-pipe(cmd("ls"), cmd("grep", ...))
+run([['ls'], ['grep', ...]])
 ```
 
 ### process substitution
@@ -11,9 +11,7 @@ pipe(cmd("ls"), cmd("grep", ...))
 diff <(zcat ... | sed ...) <(zcat ... | sed ...)
 ```
 ``` python
-cmd(
-    "diff",
-    pipe(cmd("zcat", ...), cmd("sed", ...)),
-    pipe(cmd("zcat", ...), cmd("sed", ...)),
-)
+sub1 = [['zcat', ...], ['sed', ...]]
+sub2 = [['zcat', ...], ['sed', ...]]
+run(['diff', sub1, sub2])
 ```
