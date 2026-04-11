@@ -124,24 +124,16 @@ def _get_pipe_proc(
 
 
 def shell(cmd: _CMD) -> str:
+    """Return shell representation of command as a string."""
     func = _cmdstr if isinstance(cmd[0], str) else _pipestr
     return func(cmd)
 
 
 def _cmdstr(cmd: _CMD) -> str:
-    args: List[str] = []
-    for arg in cmd:
-        if isinstance(arg, str):
-            args.append(shlex.quote(arg))
-        else:
-            func = _cmdstr if isinstance(arg[0], str) else _pipestr
-            args.append(f"<({func(arg)})")
+    args = [shlex.quote(a) if isinstance(a, str) else f"<({shell(a)})" for a in cmd]
     return " ".join(args)
 
 
-def _pipestr(pipe: _PIPELINE) -> str:
-    cmds: List[str] = []
-    for cmd in pipe:
-        func = _cmdstr if isinstance(cmd[0], str) else _pipestr
-        cmds.append(func(cmd))
-    return " | ".join(cmds)
+def _pipestr(pipeline: _PIPELINE) -> str:
+    cmd = [shell(cmd) for cmd in pipeline]
+    return " | ".join(cmd)
